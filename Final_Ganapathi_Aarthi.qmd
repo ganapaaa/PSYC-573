@@ -1,0 +1,359 @@
+---
+title: "HW 8"
+author: "Aarthi Ganapathi"
+message: false
+echo: false
+format: html
+---
+
+```{r}
+#| message: false
+library(here)
+library(readxl)  # for reading excel files
+library(modelsummary)  # for summarizing data
+library(cmdstanr)  # use two cores
+library(posterior)
+library(bayesplot)
+library(brms)
+library(tidyverse)
+library(insight)
+library(tidybayes)
+
+```
+
+# Research Question
+
+> Do individuals' perception of emotional support sources differ across the adult lifespan, and is this effect moderated by sexual orientation?
+
+# Variables
+
+-   `identity_bin`: sexual orientation of respondents (0 = exclusively heterosexual, 1 = not exclusively heterosexual)
+-   `support_partner`: perceived reliance on romantic partner/spouse for emotional support on a scale of 1-5, 1 = not at all and 5 = a great deal
+-   `support_family`: perceived reliance on family members for emotional support on a scale of 1-5, 1 = not at all and 5 = a great deal
+-   `support_friends`: perceived reliance on friends for emotional support on a scale of 1-5, 1 = not at all and 5 = a great deal
+-   `age_bin`: age group; given the relatively limited age range of the population (20-60), typical age-related terms (i.e., younger vs older adult) will not be used, but instead participants are sorted into lower, middle, and upper age groups; lower = ages 20-34, middle = 35-50; upper = 51-60
+
+## Data Import
+
+```{r}
+nchat <- read.csv(here("data_files", "nchat_trimmed.csv"), stringsAsFactors = FALSE)
+nchat <- nchat[-c(3630, 3631), ]
+nchat$identity_bin <- factor(nchat$identity_bin)  
+
+```
+
+## Variable Summary
+
+@tbl-summ-var shows the summary statistics of perceived partner support ratings by sexual orientation.
+
+
+
+```{r}
+#| label: tbl-summ-var
+#| tbl-cap: Descriptive statistics by groups
+
+datasummary(support_partner * 
+              (N + Median + Mean + SD + Min + Max + Histogram) ~
+              factor(identity_bin, labels = c("Exclusively Heterosexual", "Not Exclusively Heterosexual")),
+            data = nchat)
+
+datasummary(support_family * 
+              (N + Median + Mean + SD + Min + Max + Histogram) ~
+              factor(identity_bin, labels = c("Exclusively Heterosexual", "Not Exclusively Heterosexual")),
+            data = nchat)
+
+datasummary(support_friends * 
+              (N + Median + Mean + SD + Min + Max + Histogram) ~
+              factor(identity_bin, labels = c("Exclusively Heterosexual", "Not Exclusively Heterosexual")),
+            data = nchat)
+
+datasummary(support_partner * 
+              (N + Median + Mean + SD + Min + Max + Histogram) ~ 1,
+            data = nchat)
+
+datasummary(support_family * 
+              (N + Median + Mean + SD + Min + Max + Histogram) ~ 1,
+            data = nchat)
+
+datasummary(support_friends * 
+              (N + Median + Mean + SD + Min + Max + Histogram) ~ 1,
+            data = nchat)
+
+```
+
+# Model
+
+Model: 
+
+$$
+\begin{aligned}
+  Y_{1i}, Y_{2i}, Y_{3i} & \sim \mathcal{N}(\boldsymbol{\mu}_i, \boldsymbol{\Sigma}) \\
+  \boldsymbol{\mu}_i &= \begin{bmatrix} \mu_{1i} \\ \mu_{2i} \\ \mu_{3i} \end{bmatrix} =
+  \mathbf{X}_i \boldsymbol{\beta} \\ 
+  \mathbf{X}_i &= \begin{bmatrix} 1 & \text{identity_bin}_i & \text{age_bin}_i \end{bmatrix}
+  \\ 
+  \boldsymbol{\Sigma} & = \begin{bmatrix} \sigma_1^2 & \rho_{12}\sigma_1\sigma_2 &
+  \rho_{13}\sigma_1\sigma_3 \\ \rho_{12}\sigma_1\sigma_2 & \sigma_2^2 &
+  \rho_{23}\sigma_2\sigma_3 \\ \rho_{13}\sigma_1\sigma_3 & \rho_{23}\sigma_2\sigma_3 &
+  \sigma_3^2 \end{bmatrix} 
+\end{aligned}
+$$ 
+
+
+Priors are pulled from Li, Ji, & Chen 2014, which estimated perceived support sources specifically in married older adults:
+$$
+  \begin{aligned}
+     \boldsymbol{\beta}_1,upper = N(4.23, 0.95^2) \\
+     \boldsymbol{\beta}_2,upper = N(3.95, 0.92^2) \\
+     \boldsymbol{\beta}_3,upper = N(3.12, 0.93^2)
+  \end{aligned}
+$$
+
+## Analysis
+
+
+First, run the Gaussian model without any added priors: 
+```{r}
+#| include: false
+
+m1 <- 
+  bf(mvbind(support_partner, support_family, support_friends) ~ identity_bin + age_bin + identity_bin*age_bin) + set_rescor(TRUE)
+
+fit1 <- brm(m1, data = nchat, 
+            chains = 2, 
+            cores = 2
+            )
+```
+
+Including age priors from Li, Ji, & Chen (2014): 
+
+```{r}
+
+m2 <- 
+  bf(mvbind(support_partner, support_family, support_friends) ~ identity_bin + age_bin + identity_bin:age_bin) + set_rescor(TRUE)
+
+priors <- c(set_prior("normal(4.23, 0.95)", 
+                        class = "b", 
+                        coef = "age_binUPPER", 
+                        resp = "supportpartner"),  
+            set_prior("normal(3.95, 0.92)", 
+                        class = "b", 
+                        coef = "age_binUPPER", 
+                        resp = "supportfamily"),
+            set_prior("normal(3.12, 0.93)", 
+                        class = "b", 
+                        coef = "age_binUPPER", 
+                        resp = "supportfriends")
+)
+
+fit2 <- brm(m1, data = nchat, 
+            prior = priors,
+            chains = 2, 
+            cores = 2
+            )
+```
+
+
+Then, to run the cumulative model. First, ensure support variables are being treated as ordinal
+``` {r}
+nchat$support_partner <- factor(nchat$support_partner, levels = 1:5, ordered = TRUE)
+nchat$support_family <- factor(nchat$support_family, levels = 1:5, ordered = TRUE)
+nchat$support_friends <- factor(nchat$support_friends, levels = 1:5, ordered = TRUE)
+
+```
+
+The model without any added priors: 
+```{r}
+#| include: false
+
+m3 <- 
+  bf(mvbind(support_partner, support_family, support_friends) ~ identity_bin + age_bin + identity_bin*age_bin)
+
+fit3 <- brm(m3, data = nchat, 
+            chains = 2, 
+            cores = 2, 
+            family = cumulative())
+```
+
+The priors from Li, Ji, & Chen (2014) do not translate to a cumulative/categorical model; thus, this model will only be run with default priors. 
+
+# Results
+
+``` {r}
+fit1 <- add_criterion(fit1, "loo")
+summary(fit1)
+```
+
+
+``` {r}
+print(loo(fit1))
+
+pp_check(fit1, resp = "supportpartner")
+pp_check(fit1, resp = "supportfamily")
+pp_check(fit1, resp = "supportfriends")
+```
+The model does not seem to fit properly.
+
+``` {r}
+
+print(loo(fit2))
+
+fit2 <- add_criterion(fit2, "loo")
+summary(fit2)
+
+```
+
+``` {r}
+pp_check(fit2, resp = "supportpartner")
+pp_check(fit2, resp = "supportfamily")
+pp_check(fit2, resp = "supportfriends")
+```
+
+The specified priors does not seem to improve the model fit much at all.
+
+
+``` {r}
+print(loo(fit3))
+
+fit3 <- add_criterion(fit3, "loo")
+summary(fit3)
+
+```
+
+``` {r}
+pp_check(fit3, resp = "supportpartner")
+pp_check(fit3, resp = "supportfamily")
+pp_check(fit3, resp = "supportfriends")
+```
+
+As shown in the rank histogram in @fig-rank-hist-fit below, the chains mixed well.
+
+
+```{r}
+#| label: fig-rank-hist-fit
+#| fig-cap: Rank histogram of the posterior distributions of model parameters.
+as_draws(fit1) |>
+    mcmc_rank_hist(pars = c("b_supportpartner_identity_bin:age_binUPPER",
+                            "b_supportpartner_identity_bin:age_binMIDDLE",
+                            "b_supportfamily_identity_bin:age_binUPPER",
+                            "b_supportfamily_identity_bin:age_binMIDDLE",
+                            "b_supportfriends_identity_bin:age_binUPPER",
+                            "b_supportfriends_identity_bin:age_binMIDDLE"))
+```
+
+@tbl-summmary-table1 shows the posterior distributions of the interaction between age and sexual orientation with default priors.
+
+```{r}
+#| label: tbl-summary-table1
+#| tbl-cap: Posterior summary of the model parameters.
+# Extract draws from the model
+
+draws1 <- as_draws(fit1)
+subset1 <-  subset_draws(draws1, variable = c("b_supportpartner_identity_bin", "b_supportpartner_age_binUPPER", "b_supportpartner_identity_bin:age_binUPPER", "b_supportfamily_identity_bin", "b_supportfamily_age_binUPPER", "b_supportfamily_identity_bin:age_binUPPER", "b_supportfriends_identity_bin", "b_supportfriends_age_binUPPER", "b_supportfriends_identity_bin:age_binUPPER"))
+
+summary_table1 <- summarise_draws(subset1)
+knitr::kable(summary_table1, digits = 2)
+```
+
+Similarly, for @fig-rank-hist-fit2 below, the chains mixed well.
+
+``` {r}
+#| label: fig-rank-hist-fit-2
+#| fig-cap: Rank histogram of the posterior distributions of model parameters.
+as_draws(fit2) |>
+    mcmc_rank_hist(pars = c("b_supportpartner_identity_bin:age_binUPPER",
+                            "b_supportpartner_identity_bin:age_binMIDDLE",
+                            "b_supportfamily_identity_bin:age_binUPPER",
+                            "b_supportfamily_identity_bin:age_binMIDDLE",
+                            "b_supportfriends_identity_bin:age_binUPPER",
+                            "b_supportfriends_identity_bin:age_binMIDDLE"))
+```
+
+@tbl-summmary-table2 shows the posterior distributions of the interaction between age and sexual orientation with the Li, Ji, & Chen (2014)-informed priors.
+
+```{r}
+#| label: tbl-summary-table2
+#| tbl-cap: Posterior summary of the model parameters.
+# Extract draws from the model
+
+draws2 <- as_draws(fit2)
+subset2 <-  subset_draws(draws2, variable = c("b_supportpartner_identity_bin", "b_supportpartner_age_binUPPER", "b_supportpartner_identity_bin:age_binUPPER", "b_supportfamily_identity_bin", "b_supportfamily_age_binUPPER", "b_supportfamily_identity_bin:age_binUPPER", "b_supportfriends_identity_bin", "b_supportfriends_age_binUPPER", "b_supportfriends_identity_bin:age_binUPPER"))
+
+summary_table2 <- summarise_draws(subset2)
+knitr::kable(summary_table2, digits = 2)
+```
+
+Similarly, for @fig-rank-hist-fit3 below, the chains mixed well.
+
+``` {r}
+#| label: fig-rank-hist-fit-3
+#| fig-cap: Rank histogram of the posterior distributions of model parameters.
+as_draws(fit3) |>
+    mcmc_rank_hist(pars = c("b_supportpartner_identity_bin:age_binUPPER",
+                            "b_supportpartner_identity_bin:age_binMIDDLE",
+                            "b_supportfamily_identity_bin:age_binUPPER",
+                            "b_supportfamily_identity_bin:age_binMIDDLE",
+                            "b_supportfriends_identity_bin:age_binUPPER",
+                            "b_supportfriends_identity_bin:age_binMIDDLE"))
+```
+
+@tbl-summmary-table3 shows the posterior distributions of the interaction between age and sexual orientation using the cumulative family. 
+
+```{r}
+#| label: tbl-summary-table3
+#| tbl-cap: Posterior summary of the model parameters.
+# Extract draws from the model
+
+draws3 <- as_draws(fit3)
+subset3 <-  subset_draws(draws3, variable = c("b_supportpartner_identity_bin", 
+                                              "b_supportpartner_age_binMIDDLE",
+                                              "b_supportpartner_identity_bin:age_binMIDDLE",
+                                              "b_supportpartner_age_binUPPER",
+                                              "b_supportpartner_identity_bin:age_binUPPER",
+                                              "b_supportfamily_identity_bin",
+                                              "b_supportfamily_age_binMIDDLE",
+                                              "b_supportfamily_identity_bin:age_binMIDDLE",
+                                              "b_supportfamily_age_binUPPER",
+                                              "b_supportfamily_identity_bin:age_binUPPER",
+                                              "b_supportfriends_identity_bin",
+                                              "b_supportfriends_age_binMIDDLE",
+                                              "b_supportfriends_identity_bin:age_binMIDDLE",
+                                              "b_supportfriends_age_binUPPER",
+                                              "b_supportfriends_identity_bin:age_binUPPER"))
+
+summary_table3 <- summarise_draws(subset3)
+knitr::kable(summary_table3, digits = 2)
+```
+
+
+``` {r}
+
+# Generate marginal effects for main effects of age and identity
+main_effects_age_plot <- conditional_effects(
+  fit3, 
+  effects = "age_bin",
+  conditions = data.frame(identity_bin = c(0, 1))
+  )
+plot(main_effects_plot)
+
+main_effects_identity_plot <- conditional_effects(
+  fit3, 
+  effects = "identity_bin", 
+  conditions = data.frame(age_bin = c("LOWER", "MIDDLE", "UPPER"))
+)
+plot(main_effects_identity)
+```
+
+```{r}
+
+nchat$identity_bin <- factor(nchat$identity_bin)  
+
+interaction_effects_plot <- conditional_effects(
+  fit3, 
+  effects = "age_bin:identity_bin",
+)
+plot(interaction_effects)
+```
+
+
+In general, these results suggest that there is a clear moderation effect of sexual minority status on age differences in emotion support reception. Although reliance on romantic partners for emotional support generally decreases with age, this decrease is less pronounced in sexual minority individuals. Similarly, reliance on family generally increases with age, but this effect almost entirely reverses in sexual minority individuals. Lastly, friend support decreases with age, but this effect is also less pronounced in sexual minority individuals. 
